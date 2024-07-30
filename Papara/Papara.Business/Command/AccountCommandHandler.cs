@@ -1,7 +1,9 @@
 using AutoMapper;
 using Hangfire;
 using MediatR;
+using Newtonsoft.Json;
 using Papara.Base.Response;
+using Papara.Business.RabbitMQ;
 using Papara.Bussiness.Cqrs;
 using Papara.Bussiness.Notification;
 using Papara.Data.Domain;
@@ -18,15 +20,17 @@ public class AccountCommandHandler :
     private readonly IUnitOfWork unitOfWork;
     private readonly IMapper mapper;
     private readonly INotificationService notificationService;
+	private readonly RabbitMQPublisher rabbitMQPublisher;
 
-    public AccountCommandHandler(IUnitOfWork unitOfWork, IMapper mapper,INotificationService notificationService)
-    {
-        this.unitOfWork = unitOfWork;
-        this.mapper = mapper;
-        this.notificationService = notificationService;
-    }
+	public AccountCommandHandler(IUnitOfWork unitOfWork, IMapper mapper, INotificationService notificationService, RabbitMQPublisher rabbitMQPublisher)
+	{
+		this.unitOfWork = unitOfWork;
+		this.mapper = mapper;
+		this.notificationService = notificationService;
+		this.rabbitMQPublisher = rabbitMQPublisher;
+	}
 
-    public async Task<ApiResponse<AccountResponse>> Handle(CreateAccountCommand request, CancellationToken cancellationToken)
+	public async Task<ApiResponse<AccountResponse>> Handle(CreateAccountCommand request, CancellationToken cancellationToken)
     {
 		var mapped = mapper.Map<AccountRequest, Account>(request.Request);
 		mapped.OpenDate = DateTime.Now;
@@ -49,8 +53,17 @@ public class AccountCommandHandler :
     [AutomaticRetryAttribute(Attempts = 3,DelaysInSeconds = new []{10,15,18 },OnAttemptsExceeded = AttemptsExceededAction.Fail)]
      public void SendEmail(string email,string name,string currencyCode)
     {
-        notificationService.SendEmail("Yeni hesap acilisi",email,$"Merhaba, {name}, Adiniza ${currencyCode} doviz cinsi hesabiniz acilmistir.");
-    }
+		//notificationService.SendEmail("Yeni hesap acilisi",email,$"Merhaba, {name}, Adiniza ${currencyCode} doviz cinsi hesabiniz acilmistir.");
+
+		var message = JsonConvert.SerializeObject(new
+		{
+			Email = email,
+			Name = name,
+			Subject = "Yeni hesap açýlýþý",
+			Content = $"Merhaba, {name}, Adýnýza {currencyCode} döviz cinsi hesabýnýz açýlmýþtýr."
+		});
+		rabbitMQPublisher.Publish(message);
+	}
 
     public async Task<ApiResponse> Handle(UpdateAccountCommand request, CancellationToken cancellationToken)
     {

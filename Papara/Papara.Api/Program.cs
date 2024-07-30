@@ -6,11 +6,14 @@ using Hangfire;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.IdentityModel.Tokens;
+using Microsoft.OpenApi.Models;
 using Papara.API.Filters;
 using Papara.API.Middleware;
 using Papara.API.Modules;
 using Papara.Base;
 using Papara.Base.Token;
+using Papara.Business;
+using Papara.Business.RabbitMQ;
 using Papara.Business.Validations;
 using Papara.Bussiness.Notification;
 using Papara.Bussiness.Token;
@@ -29,24 +32,25 @@ namespace Papara.Api
 		{
 			var builder = WebApplication.CreateBuilder(args);
 
-			var config = new ConfigurationBuilder() 
-		   .AddJsonFile("appsettings.json") 
+			var config = new ConfigurationBuilder()
+		   .AddJsonFile("appsettings.json")
 		   .Build();
 
 			// Serilog konfigürasyonu
-			Log.Logger = new LoggerConfiguration() 
+			Log.Logger = new LoggerConfiguration()
 				.ReadFrom.Configuration(config)
-				.CreateLogger(); 
+				.CreateLogger();
 
-			Log.Information("Application is starting..."); 
+			Log.Information("Application is starting...");
 
-			var jwtConfig = builder.Configuration.GetSection("JwtConfig").Get<JwtConfig>(); 
-			builder.Services.AddSingleton(jwtConfig); 
+			var jwtConfig = builder.Configuration.GetSection("JwtConfig").Get<JwtConfig>();
+			builder.Services.AddSingleton(jwtConfig);
 
 
 
 			builder.Services.AddControllers(options => options.Filters.Add(new ValidateFilterAttribute()))
-					.AddFluentValidation(fv => {
+					.AddFluentValidation(fv =>
+					{
 						fv.RegisterValidatorsFromAssemblyContaining<CustomerRequestValidator>();
 						fv.DisableDataAnnotationsValidation = true; // Veri anotasyonlarýný devre dýþý býrak
 					})
@@ -70,7 +74,34 @@ namespace Papara.Api
 			});
 
 			builder.Services.AddEndpointsApiExplorer();
-			builder.Services.AddSwaggerGen();
+			
+
+
+			builder.Services.AddSwaggerGen(option =>
+			{
+				option.SwaggerDoc("v1", new OpenApiInfo { Title = "Papara API", Version = "v1" });
+				option.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
+				{
+					In = ParameterLocation.Header,
+					Description = "Please enter a valid token",
+					Name = "Authorization",
+					Type = SecuritySchemeType.Http,
+					BearerFormat = "JWT",
+					Scheme = "Bearer"
+				});
+				option.AddSecurityRequirement(new OpenApiSecurityRequirement
+			{{
+				new OpenApiSecurityScheme
+				{
+					Reference = new OpenApiReference
+					{
+						Type = ReferenceType.SecurityScheme,
+						Id = "Bearer"
+					}
+				},
+				new string[] {}
+			}});
+			});
 
 			builder.Host.UseServiceProviderFactory(new AutofacServiceProviderFactory());
 			builder.Host.ConfigureContainer<ContainerBuilder>(containerBuilder =>
@@ -101,12 +132,12 @@ namespace Papara.Api
 
 
 			var redisConfig = new ConfigurationOptions();
-			redisConfig.DefaultDatabase = 0; 
-			redisConfig.EndPoints.Add(builder.Configuration["Redis:Host"], Convert.ToInt32(builder.Configuration["Redis:Port"])); 
+			redisConfig.DefaultDatabase = 0;
+			redisConfig.EndPoints.Add(builder.Configuration["Redis:Host"], Convert.ToInt32(builder.Configuration["Redis:Port"]));
 			builder.Services.AddStackExchangeRedisCache(opt =>
 			{
-				opt.ConfigurationOptions = redisConfig; 
-				opt.InstanceName = builder.Configuration["Redis:InstanceName"]; 
+				opt.ConfigurationOptions = redisConfig;
+				opt.InstanceName = builder.Configuration["Redis:InstanceName"];
 			});
 
 
@@ -120,17 +151,15 @@ namespace Papara.Api
 			});
 
 
+			// RabbitMQ and EmailJobService
+			builder.Services.AddSingleton<EmailJobService>();
+			builder.Services.AddSingleton<INotificationService, NotificationService>();
+			builder.Services.AddSingleton<RabbitMQPublisher>();
 
-			// Add Hangfire configuration
-			builder.Services.AddHangfire(configuration => configuration 
-				.SetDataCompatibilityLevel(CompatibilityLevel.Version_180) 
-				.UseSimpleAssemblyNameTypeSerializer() 
-				.UseRecommendedSerializerSettings()
+			builder.Services.AddHangfire(configuration => configuration
 				.UseSqlServerStorage(builder.Configuration.GetConnectionString("HangfireConnection")));
-
 			builder.Services.AddHangfireServer();
 
-			builder.Services.AddSingleton<INotificationService, NotificationService>();
 
 			builder.Services.AddSingleton<Action<RequestProfilerModel>>(model =>
 			{
@@ -143,7 +172,7 @@ namespace Papara.Api
 
 
 
-			builder.Services.AddMemoryCache(); 
+			builder.Services.AddMemoryCache();
 
 
 			builder.Host.UseSerilog();
@@ -162,10 +191,14 @@ namespace Papara.Api
 			}
 
 			app.UseHangfireDashboard();
+			app.Services.GetService<IRecurringJobManager>()?.AddOrUpdate<EmailJobService>(
+				"email-processing-job",
+				service => service.ProcessEmailQueue(),
+				"*/5 * * * * *");
 			app.UseMiddleware<ErrorHandlerMiddleware>();
 			//app.UseMiddleware<LoggerMiddleware>();
 			app.UseMiddleware<HeartbeatMiddleware>();
-			app.UseMiddleware<RequestLoggingMiddleware>(); 
+			app.UseMiddleware<RequestLoggingMiddleware>();
 
 			app.UseHttpsRedirection();
 			app.UseAuthentication();
